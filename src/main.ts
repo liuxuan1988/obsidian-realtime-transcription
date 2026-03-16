@@ -35,7 +35,7 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
   private pendingTranscript: PendingTranscript | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushSeq = 0;
-  private lastCommittedPartialText = "";
+  private committedPartialTexts: string[] = [];
   private summaryBuffer = "";
   private summaryInFlight = false;
   private metaSummaryTexts: string[] = [];
@@ -247,6 +247,7 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     this.resetRollbackCandidate();
     this.lastPartialLanguage = "zh";
     this.lastPartialWallTime = null;
+    this.committedPartialTexts = [];
     currentView.clearStreamingTranscript();
 
     // 1. 启动后端
@@ -321,6 +322,7 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     this.resetRollbackCandidate();
     this.lastPartialLanguage = "zh";
     this.lastPartialWallTime = null;
+    this.committedPartialTexts = [];
 
     const view = this.getView();
     if (view) {
@@ -342,31 +344,45 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     const resultType = result.type ?? "final";
     console.log(`[Transcription] recv ${resultType}: lang=${normalizedLanguage} "${text.slice(0, 60)}"`);
 
-    // 前端文本去重：flush 后后端缓冲区可能尚未清空，partial/final 都可能包含已提交内容
-    if (this.lastCommittedPartialText) {
-      let commonLen = 0;
-      const maxCheck = Math.min(this.lastCommittedPartialText.length, text.length);
-      while (commonLen < maxCheck && text[commonLen] === this.lastCommittedPartialText[commonLen]) commonLen++;
-
-      if (commonLen >= this.lastCommittedPartialText.length * 0.5) {
-        const newPart = text.slice(commonLen).trim();
-        if (!newPart || newPart.length < 2) {
-          console.log(`[Transcription] ✗ ${resultType} 与已提交文本重复，跳过`);
-          if (resultType === "final") {
-            this.lastPartialText = "";
-            this.lastStablePartialText = "";
-            this.renderedPartialText = "";
-            this.resetRollbackCandidate();
-            this.lastPartialLanguage = "zh";
-            this.lastPartialWallTime = null;
-            this.lastCommittedPartialText = "";
-          }
-          return;
+    // 前端文本去重：将同一 VAD 段内所有已 flush 的 partial 拼接，与新文本做重叠匹配
+    if (this.committedPartialTexts.length > 0) {
+      const committedJoined = this.committedPartialTexts.join("").replace(/\s+/g, "");
+      const textNorm = text.replace(/\s+/g, "");
+      if (textNorm.length > 0 && committedJoined.length > 0) {
+        let overlapLen = 0;
+        for (let k = 1; k <= committedJoined.length; k++) {
+          if (textNorm.startsWith(committedJoined.slice(0, k))) overlapLen = k;
         }
-        text = newPart;
-        this.lastCommittedPartialText = "";
-      } else if (commonLen < 3 && text.length >= 4) {
-        this.lastCommittedPartialText = "";
+        if (overlapLen >= committedJoined.length * 0.5) {
+          const newNorm = textNorm.slice(overlapLen);
+          if (!newNorm || newNorm.length < 2) {
+            console.log(`[Transcription] ✗ ${resultType} 与已提交文本重复，跳过`);
+            if (resultType === "final") {
+              this.lastPartialText = "";
+              this.lastStablePartialText = "";
+              this.renderedPartialText = "";
+              this.resetRollbackCandidate();
+              this.lastPartialLanguage = "zh";
+              this.lastPartialWallTime = null;
+              this.committedPartialTexts = [];
+            }
+            return;
+          }
+          // 从原始 text 中定位重叠边界，保留空格格式
+          let cutIdx = 0;
+          let normIdx = 0;
+          for (let ci = 0; ci < text.length && normIdx < overlapLen; ci++) {
+            if (/\s/.test(text[ci])) continue;
+            normIdx++;
+            cutIdx = ci + 1;
+          }
+          text = text.slice(cutIdx).trim();
+          if (!text) { this.committedPartialTexts = []; return; }
+          console.log(`[Transcription] dedup: trimmed overlap, remaining="${text.slice(0, 60)}"`);
+          this.committedPartialTexts = [];
+        } else if (overlapLen < 3 && textNorm.length >= 4) {
+          this.committedPartialTexts = [];
+        }
       }
     }
 
@@ -435,7 +451,7 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     this.resetRollbackCandidate();
     this.lastPartialLanguage = "zh";
     this.lastPartialWallTime = null;
-    this.lastCommittedPartialText = ""; // final 意味着后端缓冲区已清空
+    this.committedPartialTexts = []; // final 意味着后端缓冲区已清空
 
     const now = Date.now();
     const flushWindowMs = Math.max(1, this.settings.aggregation.flushWindowSec) * 1000;
@@ -554,9 +570,9 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     const mergedText = pending.texts.join(" ").trim();
     if (!mergedText) return;
 
-    // 保存已提交的 partial 文本，用于前端去重
+    // 保存已提交的 partial 文本，用于前端去重（追加到数组，跟踪同一 VAD 段内所有 flush）
     if (pending.partialOnly) {
-      this.lastCommittedPartialText = mergedText;
+      this.committedPartialTexts.push(mergedText);
     }
 
     const view = this.getView();
