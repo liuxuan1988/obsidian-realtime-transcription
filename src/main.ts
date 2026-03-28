@@ -156,6 +156,13 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
         model: this.settings.translation.model,
       };
     }
+
+    // 兼容旧配置：asrProvider / tencentASR 不存在时使用默认值
+    if (!this.settings.asrProvider) {
+      this.settings.asrProvider = "local";
+    }
+    // 深合并 tencentASR（应对部分保存的情况，确保所有字段都有默认值）
+    this.settings.tencentASR = { ...DEFAULT_SETTINGS.tencentASR, ...this.settings.tencentASR };
   }
 
   async saveSettings(): Promise<void> {
