@@ -44,6 +44,16 @@ test("trimCommittedPrefix drops leftover leading punctuation after overlap trimm
   assert.equal(trimmed.trimmedText, "新增内容");
 });
 
+test("trimCommittedPrefix tolerates a corrected character inside the overlapped prefix", () => {
+  const trimmed = trimCommittedPrefix(
+    ["以修复这一类前一条partial落卡后一条final"],
+    "以修复这一类前一条partial洛卡后一条final顺手补了一个边界裁剪",
+  );
+
+  assert.equal(trimmed.hasOverlap, true);
+  assert.equal(trimmed.trimmedText, "顺手补了一个边界裁剪");
+});
+
 test("isStalePartialResult rejects partials from an older flush sequence", () => {
   assert.equal(
     isStalePartialResult({ type: "partial", text: "旧partial", language: "zh", timestamps: { start: 0, duration: 0 }, flush_seq: 2 }, 3),
