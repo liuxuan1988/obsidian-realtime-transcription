@@ -50,15 +50,16 @@ export class TencentASRClient {
   /**
    * 构建签名并连接到腾讯云 ASR WebSocket
    */
-  connect(): Promise<void> {
+  async connect(): Promise<void> {
     this.shouldReconnect = true;
 
+    // 先获取服务器时间（官方 SDK 做法，避免本地时钟偏差导致签名失败）
+    const url = await this.buildSignedUrl();
+    if (!url) {
+      throw new Error("腾讯云 ASR 配置不完整（AppID / SecretID / SecretKey）");
+    }
+
     return new Promise<void>((resolve, reject) => {
-      const url = this.buildSignedUrl();
-      if (!url) {
-        reject(new Error("腾讯云 ASR 配置不完整（AppID / SecretID / SecretKey）"));
-        return;
-      }
 
       try {
         this.ws = new WebSocket(url);
@@ -247,6 +248,25 @@ export class TencentASRClient {
   }
 
   /**
+   * 从腾讯云服务器获取时间戳（避免本地时钟偏差导致签名失败）
+   * 官方 JS SDK 也是这么做的：https://github.com/TencentCloud/tencentcloud-speech-sdk-js
+   */
+  private async fetchServerTime(): Promise<number> {
+    try {
+      const resp = await fetch("https://asr.cloud.tencent.com/server_time");
+      const text = await resp.text();
+      const ts = parseInt(text, 10);
+      if (ts > 0) {
+        console.log(`[TencentASR] 服务器时间: ${ts}, 本地时间: ${Math.floor(Date.now() / 1000)}, 偏差: ${ts - Math.floor(Date.now() / 1000)}s`);
+        return ts;
+      }
+    } catch (err) {
+      console.warn("[TencentASR] 获取服务器时间失败，使用本地时间:", err);
+    }
+    return Math.floor(Date.now() / 1000);
+  }
+
+  /**
    * 构建带 HMAC-SHA1 签名的 WebSocket URL
    *
    * 签名流程:
@@ -254,25 +274,22 @@ export class TencentASRClient {
    * 2. 拼接为 host/path?key1=val1&key2=val2（ASR WebSocket 不加 GET 前缀）
    * 3. HMAC-SHA1(plaintext, secretKey) → Base64 → URL encode
    */
-  private buildSignedUrl(): string | null {
+  private async buildSignedUrl(): Promise<string | null> {
     const { appId, secretId, secretKey } = this.settings;
     if (!appId || !secretId || !secretKey) return null;
 
-    const now = Math.floor(Date.now() / 1000);
+    const now = await this.fetchServerTime();
     const voiceId = this.generateVoiceId();
 
+    // 仅含必要参数（与官方 SDK 一致），可选参数不加入签名
     const params: Record<string, string> = {
       secretid: secretId,
       timestamp: String(now),
       expired: String(now + 86400),
-      nonce: String(Math.floor(Math.random() * 1e9)),
+      nonce: String(Math.round(Date.now() / 100000)),
       engine_model_type: this.settings.engineModelType,
       voice_id: voiceId,
-      voice_format: "1", // 1 = PCM
-      needvad: "1",
-      filter_dirty: "0",
-      filter_punc: "0",
-      convert_num_mode: "1",
+      voice_format: "1",
     };
 
     // 按 key 字典序排列
@@ -289,6 +306,12 @@ export class TencentASRClient {
 
     // URL 编码签名（必须编码 + 和 =）
     const encodedSignature = encodeURIComponent(signature);
+
+    console.log(`[TencentASR] AppID: "${appId}" (len=${appId.length})`);
+    console.log(`[TencentASR] SecretID: "${secretId.slice(0, 8)}..." (len=${secretId.length})`);
+    console.log(`[TencentASR] SecretKey len=${secretKey.length}, first4="${secretKey.slice(0, 4)}"`);
+    console.log(`[TencentASR] 签名原文: ${signPlaintext}`);
+    console.log(`[TencentASR] 签名结果: ${signature}`);
 
     return `wss://asr.cloud.tencent.com/asr/v2/${appId}?${queryString}&signature=${encodedSignature}`;
   }
