@@ -12,6 +12,12 @@ import { TranscriptionSettingTab } from "./settings";
 import { DEFAULT_SETTINGS, PluginSettings, TranscriptEntry, TranscriptionResult, SerializedTranscriptEntry } from "./types";
 import { resolvePluginDir } from "./utils/pluginPaths";
 import { serializeEntry, deserializeEntry } from "./utils/entrySerializer";
+import {
+  comparableLength,
+  comparableStartsWith,
+  longestComparablePrefixLength,
+  shouldResetNoisyPartial,
+} from "./utils/partialStability";
 import { isStalePartialResult, trimCommittedPrefix } from "./utils/transcriptDedup";
 import { TitleInputModal } from "./views/TitleInputModal";
 import { t, setLocale } from "./i18n";
@@ -727,6 +733,7 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
 
     const profile = this.settings.realtimeProfile ?? "stable";
     const previousDisplay = this.renderedPartialText.trim();
+    const currentComparableLength = comparableLength(current);
     const hanCount = (current.match(/[\u3400-\u9fff]/g) ?? []).length;
     const latinCount = (current.match(/[A-Za-z]/g) ?? []).length;
     const minLen = hanCount > 0
@@ -745,25 +752,31 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
 
     if (current === previousDisplay) return null;
 
-    const lcp = this.longestCommonPrefixLength(previousDisplay, current);
+    if (shouldResetNoisyPartial(previousDisplay, current)) {
+      this.resetRollbackCandidate();
+      return current;
+    }
+
+    const previousComparableLength = comparableLength(previousDisplay);
+    const lcp = longestComparablePrefixLength(previousDisplay, current);
 
     // 最稳定情况：只在尾部增长，立即放行，保证低延迟。
-    if (current.startsWith(previousDisplay)) {
+    if (comparableStartsWith(current, previousDisplay)) {
       this.resetRollbackCandidate();
-      const grew = current.length - previousDisplay.length;
+      const grew = currentComparableLength - previousComparableLength;
       if (grew >= 1 || endsSentence) return current;
       return null;
     }
 
     // 允许受控回滚：只在短回滚且高前缀一致时，并采用“候选二次确认”。
-    if (current.length < previousDisplay.length) {
-      const shrink = previousDisplay.length - current.length;
+    if (currentComparableLength < previousComparableLength) {
+      const shrink = previousComparableLength - currentComparableLength;
       const maxRollback = hanCount > 0
         ? (profile === "fast" ? 8 : 6)
         : (profile === "fast" ? 14 : 12);
       const prefixNeed = Math.max(
         4,
-        Math.floor(previousDisplay.length * (profile === "fast" ? 0.62 : 0.72)),
+        Math.floor(previousComparableLength * (profile === "fast" ? 0.62 : 0.72)),
       );
       if (lcp < prefixNeed || shrink > maxRollback) {
         this.resetRollbackCandidate();
@@ -776,10 +789,10 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     }
 
     // 同长改写：句尾时允许一次修正，否则容易抖动。
-    if (current.length === previousDisplay.length) {
+    if (currentComparableLength === previousComparableLength) {
       const sameLenAnchor = Math.max(
         4,
-        Math.floor(previousDisplay.length * (profile === "fast" ? 0.65 : 0.75)),
+        Math.floor(previousComparableLength * (profile === "fast" ? 0.65 : 0.75)),
       );
       if (endsSentence && lcp >= sameLenAnchor) {
         this.resetRollbackCandidate();
@@ -793,22 +806,13 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     const revisionWindow = hanCount > 0
       ? (profile === "fast" ? 12 : 8)
       : (profile === "fast" ? 18 : 14);
-    const protectedPrefix = Math.max(3, previousDisplay.length - revisionWindow);
+    const protectedPrefix = Math.max(3, previousComparableLength - revisionWindow);
     if (lcp < protectedPrefix && !endsSentence) {
       return null;
     }
 
-    if (!endsSentence && current.length < minLen) return null;
+    if (!endsSentence && currentComparableLength < minLen) return null;
     return current;
-  }
-
-  private longestCommonPrefixLength(a: string, b: string): number {
-    const n = Math.min(a.length, b.length);
-    let i = 0;
-    while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) {
-      i += 1;
-    }
-    return i;
   }
 
   private shouldAcceptRollbackCandidate(
