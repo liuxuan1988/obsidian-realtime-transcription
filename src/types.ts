@@ -33,6 +33,16 @@ export type RealtimeProfile = "stable" | "fast";
 export type RecognitionMode = "zh-en" | "zh" | "en";
 export type GpuProvider = "cpu" | "cuda" | "coreml";
 
+export type AsrProvider = "local" | "tencent";
+
+export interface TencentASRSettings {
+  appId: string;
+  secretId: string;
+  secretKey: string;
+  /** 引擎模型：16k_zh / 16k_en / 16k_zh_large 等 */
+  engineModelType: string;
+}
+
 export interface AggregationSettings {
   flushWindowSec: number;
   maxChars: number;
@@ -47,6 +57,8 @@ export interface MetaSummarySettings {
 
 export interface PluginSettings {
   locale: "zh" | "en";
+  asrProvider: AsrProvider;
+  tencentASR: TencentASRSettings;
   pythonPath: string;
   backendPort: number;
   modelDir: string;
@@ -67,6 +79,13 @@ export interface PluginSettings {
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   locale: "zh",
+  asrProvider: "local",
+  tencentASR: {
+    appId: "",
+    secretId: "",
+    secretKey: "",
+    engineModelType: "16k_zh",
+  },
   pythonPath: process.platform === "win32" ? "python" : "python3",
   backendPort: 18888,
   modelDir: "",
