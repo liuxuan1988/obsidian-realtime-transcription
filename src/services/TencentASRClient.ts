@@ -110,6 +110,14 @@ export class TencentASRClient {
           // 错误
           if (data.code !== 0) {
             console.error(`[TencentASR] 服务端错误: code=${data.code} msg=${data.message}`);
+            // 握手阶段的错误（如鉴权失败）：立即 reject 并停止重连
+            if (!handshakeResolved) {
+              handshakeResolved = true;
+              clearTimeout(timeout);
+              this.shouldReconnect = false;
+              reject(new Error(`腾讯云 ASR 错误 (${data.code}): ${data.message}`));
+              try { this.ws?.close(); } catch { /* noop */ }
+            }
             return;
           }
 
@@ -243,7 +251,7 @@ export class TencentASRClient {
    *
    * 签名流程:
    * 1. 所有参数按 key 字典序排列
-   * 2. 拼接为 GET + host/path?key1=val1&key2=val2（注意 GET 前缀无空格）
+   * 2. 拼接为 host/path?key1=val1&key2=val2（ASR WebSocket 不加 GET 前缀）
    * 3. HMAC-SHA1(plaintext, secretKey) → Base64 → URL encode
    */
   private buildSignedUrl(): string | null {
@@ -271,8 +279,8 @@ export class TencentASRClient {
     const sortedKeys = Object.keys(params).sort();
     const queryString = sortedKeys.map((k) => `${k}=${params[k]}`).join("&");
 
-    // 签名原文: GET + host + path + ? + sorted params（腾讯云要求 HTTP 方法前缀）
-    const signPlaintext = `GETasr.cloud.tencent.com/asr/v2/${appId}?${queryString}`;
+    // 签名原文: host + path + ? + sorted params（注意：ASR WebSocket 不加 GET 前缀）
+    const signPlaintext = `asr.cloud.tencent.com/asr/v2/${appId}?${queryString}`;
 
     // HMAC-SHA1 签名
     const hmac = crypto.createHmac("sha1", secretKey);
