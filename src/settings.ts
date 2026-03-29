@@ -289,19 +289,6 @@ export class TranscriptionSettingTab extends PluginSettingTab {
       // ── 云端付费账户设置 ──
       containerEl.createEl("h2", { text: t("settings.cloud.title") });
 
-      new Setting(containerEl)
-        .setName(t("settings.cloud.serverUrl.name"))
-        .setDesc(t("settings.cloud.serverUrl.desc"))
-        .addText((text) =>
-          text
-            .setPlaceholder("https://your-server.com")
-            .setValue(this.plugin.settings.cloudAuth.serverUrl)
-            .onChange(async (value) => {
-              this.plugin.settings.cloudAuth.serverUrl = value.trim();
-              await this.plugin.saveSettings();
-            }),
-        );
-
       const cloudAuth = this.plugin.settings.cloudAuth;
       const isLoggedIn = Boolean(cloudAuth.token && cloudAuth.serverUrl);
 
@@ -390,22 +377,6 @@ export class TranscriptionSettingTab extends PluginSettingTab {
           );
       }
 
-      // 引擎模型选择（cloud 模式也需要选择引擎）
-      new Setting(containerEl)
-        .setName("引擎模型")
-        .setDesc("选择识别引擎")
-        .addDropdown((dropdown) => {
-          dropdown
-            .addOption("16k_zh", "中文 (16k_zh)")
-            .addOption("16k_zh_large", "中文大模型 (16k_zh_large)")
-            .addOption("16k_en", "英文 (16k_en)")
-            .addOption("16k_zh_en", "中英混合 (16k_zh_en)")
-            .setValue(this.plugin.settings.tencentASR.engineModelType)
-            .onChange(async (value) => {
-              this.plugin.settings.tencentASR.engineModelType = value;
-              await this.plugin.saveSettings();
-            });
-        });
     }
 
     // ── 翻译设置 ──
