@@ -29,6 +29,8 @@ interface PendingTranscript {
   wallTime: Date;
   lastUpdatedAt: number;
   partialOnly: boolean;
+  /** 云端模式：该 pending 对应的原始累积文本长度（用于 flush 后更新去重游标） */
+  cloudOriginalLength?: number;
 }
 
 export default class RealtimeTranscriptionPlugin extends Plugin {
@@ -58,6 +60,8 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
   private rollbackCandidateAt = 0;
   private lastPartialLanguage = "zh";
   private lastPartialWallTime: Date | null = null;
+  /** 云端累积式 partial 已提交的前缀长度（用于去重，避免重复显示已 flush 的文本） */
+  private cloudCommittedLength = 0;
   private transcriptEntries: TranscriptEntry[] = [];
   private saveEntriesTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly ENTRIES_FILE = "transcript-entries.json";
@@ -270,6 +274,7 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     this.lastPartialLanguage = "zh";
     this.lastPartialWallTime = null;
     this.committedPartialTexts = [];
+    this.cloudCommittedLength = 0;
     currentView.clearStreamingTranscript();
 
     const isCloud = this.settings.asrProvider === "tencent";
@@ -395,6 +400,7 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     this.lastPartialLanguage = "zh";
     this.lastPartialWallTime = null;
     this.committedPartialTexts = [];
+    this.cloudCommittedLength = 0;
 
     const view = this.getView();
     if (view) {
@@ -456,6 +462,21 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
       const showStreaming = this.settings.aggregation.realtimePreview;
       const isCloud = this.settings.asrProvider !== "local";
 
+      // 云端累积式 partial：记录原始长度，然后剥离已提交的前缀
+      let cloudOriginalLength = 0;
+      if (isCloud) {
+        cloudOriginalLength = text.length;
+        if (this.cloudCommittedLength > 0) {
+          if (text.length > this.cloudCommittedLength) {
+            text = text.substring(this.cloudCommittedLength).replace(/^[，。、！？,.\s]+/, "");
+          } else {
+            // 累积文本变短（新句子开始），重置去重游标
+            this.cloudCommittedLength = 0;
+          }
+          if (!text) return;
+        }
+      }
+
       const now = new Date();
       // 云端模式跳过 stabilize：云端 ASR 已自行管理文本稳定性，
       // 且插入标点会导致 stabilize 误判为回滚而拒绝更新
@@ -496,6 +517,10 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
         this.pendingTranscript.wallTime = this.pendingTranscript.wallTime ?? now;
         this.pendingTranscript.lastUpdatedAt = Date.now();
       }
+      // 云端模式：记录原始累积长度，flush 时用于更新去重游标
+      if (isCloud) {
+        this.pendingTranscript.cloudOriginalLength = cloudOriginalLength;
+      }
       if (showStreaming) {
         console.log(`[Transcription] ✓ partial → upsert id=${this.pendingTranscript.id} "${stabilizedText}"`);
         view.upsertStreamingTranscript(
@@ -521,6 +546,15 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     this.lastPartialLanguage = "zh";
     this.lastPartialWallTime = null;
     this.committedPartialTexts = []; // final 意味着后端缓冲区已清空
+
+    // 云端 final：剥离已提交前缀，并重置去重游标（句子结束）
+    if (this.settings.asrProvider !== "local" && this.cloudCommittedLength > 0) {
+      if (text.length > this.cloudCommittedLength) {
+        text = text.substring(this.cloudCommittedLength).replace(/^[，。、！？,.\s]+/, "");
+      }
+      this.cloudCommittedLength = 0;
+      if (!text) return;
+    }
 
     const now = Date.now();
     const flushWindowMs = Math.max(1, this.settings.aggregation.flushWindowSec) * 1000;
@@ -624,18 +658,26 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
     const pending = this.pendingTranscript;
     if (!pending) return;
 
-    // 云端模式 + partialOnly：句子尚未结束（final 未到），不提交。
-    // 刷新流式卡片让用户看到当前文本，然后重新等待 final。
+    // 云端模式 + partialOnly：连续说话时 final 可能很久不到。
+    // 文本较短时继续等待；超过 maxChars 则强制提交，并更新去重游标。
     const isCloudFlush = this.settings.asrProvider !== "local";
     if (pending.partialOnly && isCloudFlush) {
-      const view = this.getView();
-      if (view) {
-        const text = pending.texts.join(" ").trim();
-        view.upsertStreamingTranscript(pending.id, text, pending.language, pending.wallTime);
+      const pendingText = pending.texts.join(" ").trim();
+      const maxChars = Math.max(80, this.settings.aggregation.maxChars);
+      if (pendingText.length < maxChars) {
+        // 文本尚短，继续等待
+        const view = this.getView();
+        if (view) {
+          view.upsertStreamingTranscript(pending.id, pendingText, pending.language, pending.wallTime);
+        }
+        this.clearFlushTimer();
+        this.scheduleFlush();
+        return;
       }
-      this.clearFlushTimer();
-      this.scheduleFlush();
-      return;
+      // 文本已超限，更新云端去重游标后 fall through 到正常 flush 流程
+      if (typeof pending.cloudOriginalLength === "number") {
+        this.cloudCommittedLength = pending.cloudOriginalLength;
+      }
     }
 
     this.pendingTranscript = null;
