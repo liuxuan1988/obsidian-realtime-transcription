@@ -46,6 +46,7 @@ export class TranscriptionSettingTab extends PluginSettingTab {
       .addDropdown((dropdown) => {
         dropdown
           .addOption("local", "本地模型（SenseVoice）")
+          .addOption("whisper", "本地模型（Whisper）")
           .addOption("tencent", "腾讯云实时语音识别")
           .setValue(this.plugin.settings.asrProvider)
           .onChange(async (value: AsrProvider) => {
@@ -57,8 +58,67 @@ export class TranscriptionSettingTab extends PluginSettingTab {
       });
 
     const isCloud = this.plugin.settings.asrProvider === "tencent";
+    const isWhisper = this.plugin.settings.asrProvider === "whisper";
 
     if (!isCloud) {
+
+    if (isWhisper) {
+    // ── Whisper 设置 ──
+    containerEl.createEl("h2", { text: "Whisper 模型设置" });
+
+    new Setting(containerEl)
+      .setName("Whisper 模型")
+      .setDesc("选择 Whisper 模型（越大精度越高，但推理越慢，延迟也越高）")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("tiny", "tiny（最快，精度最低）")
+          .addOption("base", "base")
+          .addOption("small", "small")
+          .addOption("medium", "medium")
+          .addOption("turbo", "turbo（推荐，精度与速度平衡）")
+          .setValue(this.plugin.settings.whisperModelName || "turbo")
+          .onChange(async (value: string) => {
+            this.plugin.settings.whisperModelName = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName(t("settings.backend.pythonPath.name"))
+      .setDesc(t("settings.backend.pythonPath.desc"))
+      .addText((text) => {
+        const defaultPython = process.platform === "win32" ? "python" : "python3";
+        text
+          .setPlaceholder(defaultPython)
+          .setValue(this.plugin.settings.pythonPath)
+          .onChange(async (value) => {
+            this.plugin.settings.pythonPath = value || defaultPython;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("服务端口")
+      .setDesc("Whisper WebSocket 后端端口（默认 18889，与 SenseVoice 的 18888 互不冲突）")
+      .addText((text) =>
+        text
+          .setPlaceholder("18889")
+          .setValue(String(this.plugin.settings.whisperPort || 18889))
+          .onChange(async (value) => {
+            const port = parseInt(value, 10);
+            if (port > 0 && port < 65536) {
+              this.plugin.settings.whisperPort = port;
+              await this.plugin.saveSettings();
+            }
+          }),
+      );
+
+    containerEl.createEl("p", {
+      text: "注意：Whisper 精度高于 SenseVoice，但单次推理耗时较长。建议在「高级设置」中将静音检测时长调至 1.5-2.0 秒，让 Whisper 处理更完整的句子。实时延迟约 3-5 秒。",
+      cls: "setting-item-description",
+    });
+
+    } else {
     // ── 后端设置 ──
     containerEl.createEl("h2", { text: t("settings.backend.title") });
 
@@ -213,6 +273,7 @@ export class TranscriptionSettingTab extends PluginSettingTab {
           btn.setDisabled(false);
         }),
       );
+    } // end else (SenseVoice)
     } // end if (!isCloud)
 
     if (isCloud) {

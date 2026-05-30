@@ -48,36 +48,47 @@ export class BackendManager {
     // 0. 清理孤儿进程（插件重载后 this.process 为 null，旧进程仍存活）
     this.killOrphanedProcesses();
 
+    const isWhisper = (this.settings as any).asrProvider === "whisper";
+    const modelDir = this.settings.modelDir || "";
+
     // 1. 检查 Python 环境
-    const envOk = await this.checkEnvironment();
+    const envOk = isWhisper ? await this.checkWhisperEnvironment() : await this.checkEnvironment();
     if (!envOk) {
       const pipCmd = process.platform === "win32" ? "pip" : "pip3";
-      new Notice(`${t("backend.envFail")}\n${pipCmd} install sherpa-onnx websockets numpy`);
+      const deps = isWhisper
+        ? "openai-whisper sherpa-onnx websockets numpy"
+        : "sherpa-onnx websockets numpy";
+      new Notice(`${t("backend.envFail")}\n${pipCmd} install ${deps}`);
       return false;
     }
 
-    // 2. 检查模型文件
-    const modelDir = this.settings.modelDir;
-    if (!modelDir) {
-      new Notice(t("backend.noModelDir"));
-      return false;
-    }
-
-    const requiredFiles = [
-      this.settings.useInt8 ? "model.int8.onnx" : "model.onnx",
-      "tokens.txt",
-      "silero_vad.onnx",
-    ];
-
-    for (const file of requiredFiles) {
-      if (!existsSync(path.join(modelDir, file))) {
-        new Notice(`${t("backend.modelFileMissing")}: ${file}\n${t("backend.modelFileMissingHint")}`);
+    // 2. 检查模型文件（仅 SenseVoice 需要）
+    if (!isWhisper) {
+      const modelDir = this.settings.modelDir;
+      if (!modelDir) {
+        new Notice(t("backend.noModelDir"));
         return false;
+      }
+
+      const requiredFiles = [
+        this.settings.useInt8 ? "model.int8.onnx" : "model.onnx",
+        "tokens.txt",
+        "silero_vad.onnx",
+      ];
+
+      for (const file of requiredFiles) {
+        if (!existsSync(path.join(modelDir, file))) {
+          new Notice(`${t("backend.modelFileMissing")}: ${file}\n${t("backend.modelFileMissingHint")}`);
+          return false;
+        }
       }
     }
 
     // 3. 查找可用端口（配置端口被占用时自动递增）
-    let port = this.settings.backendPort;
+    const basePort = isWhisper
+      ? ((this.settings as any).whisperPort || 18889)
+      : this.settings.backendPort;
+    let port = basePort;
     const maxRetries = 10;
     for (let i = 0; i < maxRetries; i++) {
       const inUse = await this.isPortInUse(port);
@@ -98,32 +109,44 @@ export class BackendManager {
         return false;
       }
     }
-    if (port !== this.settings.backendPort) {
-      new Notice(`${t("backend.portSwitched")}: ${this.settings.backendPort} -> ${port}`);
+    if (port !== basePort) {
+      new Notice(`${t("backend.portSwitched")}: ${basePort} -> ${port}`);
     }
     this.activePort = port;
 
     // 4. 启动 Python 后端
-    const serverScript = path.join(this.pluginDir, "backend", "server.py");
+    const backendScript = isWhisper ? "server_whisper.py" : "server.py";
+    const serverScript = path.join(this.pluginDir, "backend", backendScript);
     if (!existsSync(serverScript)) {
       new Notice(`${t("backend.scriptMissing")}: ${serverScript}`);
       return false;
     }
 
-    const args = [
-      serverScript,
-      "--model-dir", modelDir,
-      "--port", String(port),
-      "--vad-threshold", String(this.settings.vad.threshold),
-      "--vad-min-silence", String(this.settings.vad.minSilenceDuration),
-      "--partial-profile", this.settings.realtimeProfile,
-      "--recognition-mode", this.settings.recognitionMode,
-      "--provider", this.settings.gpuProvider,
-    ];
-    if (this.settings.useInt8) {
-      args.push("--use-int8");
+    const args = [serverScript];
+    if (isWhisper) {
+      const whisperModel = (this.settings as any).whisperModelName || "turbo";
+      args.push(
+        "--port", String(port),
+        "--model-name", whisperModel,
+        "--model-dir", modelDir || path.join(this.pluginDir, "backend"),
+        "--vad-threshold", String(this.settings.vad.threshold),
+        "--vad-min-silence", String(this.settings.vad.minSilenceDuration),
+      );
     } else {
-      args.push("--no-int8");
+      args.push(
+        "--model-dir", modelDir,
+        "--port", String(port),
+        "--vad-threshold", String(this.settings.vad.threshold),
+        "--vad-min-silence", String(this.settings.vad.minSilenceDuration),
+        "--partial-profile", this.settings.realtimeProfile,
+        "--recognition-mode", this.settings.recognitionMode,
+        "--provider", this.settings.gpuProvider,
+      );
+      if (this.settings.useInt8) {
+        args.push("--use-int8");
+      } else {
+        args.push("--no-int8");
+      }
     }
 
     return new Promise<boolean>((resolve) => {
@@ -249,6 +272,19 @@ export class BackendManager {
     });
   }
 
+  async checkWhisperEnvironment(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      execFile(
+        this.settings.pythonPath,
+        ["-c", "import whisper; import sherpa_onnx; import websockets; print('ok')"],
+        { timeout: 15000 },
+        (error: Error | null, stdout: string) => {
+          resolve(!error && stdout.trim() === "ok");
+        },
+      );
+    });
+  }
+
   async downloadModel(outputDir: string): Promise<boolean> {
     const downloadScript = path.join(this.pluginDir, "backend", "download_model.py");
 
@@ -332,9 +368,9 @@ export class BackendManager {
     // 策略 2：兜底，按命令行特征查找残留进程
     try {
       if (isWin) {
-        // Windows: 使用 wmic 按命令行匹配查找 server.py 进程
+        // Windows: 使用 wmic 按命令行匹配查找 server.py/server_whisper.py 进程
         const output = execSync(
-          `wmic process where "CommandLine like '%server.py%'" get ProcessId /format:list 2>nul`,
+          `wmic process where "CommandLine like '%server%.py%'" get ProcessId /format:list 2>nul`,
           { encoding: "utf-8", timeout: 3000 },
         ).trim();
         for (const line of output.split("\n")) {
@@ -353,9 +389,9 @@ export class BackendManager {
         }
       } else {
         // Unix: 使用 pgrep 查找
-        const serverScript = path.join(this.pluginDir, "backend", "server.py");
+        const serverPattern = path.join(this.pluginDir, "backend", "server");
         const output = execSync(
-          `pgrep -f "${serverScript}" 2>/dev/null || true`,
+          `pgrep -f "${serverPattern}" 2>/dev/null || true`,
           { encoding: "utf-8", timeout: 3000 },
         ).trim();
         if (output) {
@@ -418,6 +454,16 @@ export class BackendManager {
   }
 
   private getLaunchSignature(): string {
+    const isWhisper = (this.settings as any).asrProvider === "whisper";
+    if (isWhisper) {
+      return JSON.stringify({
+        pythonPath: this.settings.pythonPath,
+        whisperPort: (this.settings as any).whisperPort || 18889,
+        whisperModelName: (this.settings as any).whisperModelName || "turbo",
+        vadThreshold: this.settings.vad.threshold,
+        vadMinSilence: this.settings.vad.minSilenceDuration,
+      });
+    }
     return JSON.stringify({
       pythonPath: this.settings.pythonPath,
       modelDir: this.settings.modelDir,

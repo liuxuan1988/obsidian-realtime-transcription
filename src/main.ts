@@ -168,6 +168,14 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
       };
     }
 
+    // 兼容旧配置：whisperPort / whisperModelName 不存在时使用默认值
+    if (!this.settings.whisperPort) {
+      this.settings.whisperPort = DEFAULT_SETTINGS.whisperPort;
+    }
+    if (!this.settings.whisperModelName) {
+      this.settings.whisperModelName = DEFAULT_SETTINGS.whisperModelName;
+    }
+
     // 兼容旧配置：asrProvider / tencentASR 不存在时使用默认值
     if (!this.settings.asrProvider) {
       this.settings.asrProvider = "local";
@@ -322,8 +330,9 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
         return;
       }
     } else {
-      // [LOCAL] 本地模式：启动后端 + 连接 WebSocket
-      console.log("[Transcription] 正在启动后端...");
+      // [LOCAL] 本地模式 / Whisper 模式：启动后端 + 连接 WebSocket
+      const isWhisper = this.settings.asrProvider === "whisper";
+      console.log(`[Transcription] ${isWhisper ? "Whisper" : "本地"} 模式`, "正在启动后端...");
       currentView.setConnectionStatus(false, t("status.startingBackend"));
       const started = await this.backendManager.start();
       console.log("[Transcription] 后端启动结果:", started);
@@ -334,8 +343,10 @@ export default class RealtimeTranscriptionPlugin extends Plugin {
 
       console.log("[Transcription] 正在连接 WebSocket...");
       currentView.setConnectionStatus(false, t("status.connecting"));
+      const wsPort = this.backendManager.activePort
+        || (isWhisper ? (this.settings as any).whisperPort || 18889 : this.settings.backendPort);
       try {
-        await this.connectBackendWithRetry(this.backendManager.activePort || this.settings.backendPort);
+        await this.connectBackendWithRetry(wsPort);
       } catch (err) {
         console.error("[Transcription] WebSocket 连接失败:", err);
         new Notice(t("notice.cannotConnectBackend"));

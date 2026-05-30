@@ -33,7 +33,7 @@ export type RealtimeProfile = "stable" | "fast";
 export type RecognitionMode = "zh-en" | "zh" | "en";
 export type GpuProvider = "cpu" | "cuda" | "coreml";
 
-export type AsrProvider = "local" | "tencent";
+export type AsrProvider = "local" | "tencent" | "whisper";
 
 export interface TencentASRSettings {
   appId: string;
@@ -61,6 +61,8 @@ export interface PluginSettings {
   tencentASR: TencentASRSettings;
   pythonPath: string;
   backendPort: number;
+  whisperPort: number;
+  whisperModelName: string;
   modelDir: string;
   useInt8: boolean;
   autoStartBackend: boolean;
@@ -80,6 +82,8 @@ export interface PluginSettings {
 export const DEFAULT_SETTINGS: PluginSettings = {
   locale: "zh",
   asrProvider: "local",
+  whisperPort: 18889,
+  whisperModelName: "turbo",
   tencentASR: {
     appId: "",
     secretId: "",
